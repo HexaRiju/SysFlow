@@ -25,10 +25,10 @@ public class SimulationEngine {
         List<Tick> ticks = new ArrayList<>(config.totalTicks());
         Random random = new Random(config.randomSeed());
 
-        double sumRps = 0, sumErrorRate = 0, sumP95 = 0;
+        double sumRps = 0, sumErrorRate = 0;
         Map<String, Double> maxLoadByNode = new HashMap<>();
         Map<String, Integer> asgReplicas = new HashMap<>();
-
+        List<Double> latencySamples = new ArrayList<>();
         for (int t = 0; t < config.totalTicks(); t++) {
             Map<String, InjectedFailure> activeNodeFailures = activeFailuresByNode(config, t);
             Map<String, InjectedFailure> activeEdgeFailures = activeFailuresByEdge(config, t);
@@ -38,20 +38,38 @@ public class SimulationEngine {
             Map<String, NodeTickStats> nodeStats = new LinkedHashMap<>();
             Map<String, EdgeTickStats> edgeStats = new LinkedHashMap<>();
 
+            // Tracks the total latency accumulated by requests reaching each node.
+            // The value is latency-weighted by the incoming request rate.
+            Map<String, Double> incomingLatencyWeighted = new HashMap<>();
+
             double perClientArrival = (config.targetRps() / SimulationConfig.TICKS_PER_SECOND)
                     / Math.max(1, graph.clientNodes().size());
             for (GraphNode client : graph.clientNodes()) {
                 incomingRate.merge(client.id(), perClientArrival, Double::sum);
+
+                // Client-side starting point: no backend latency has been accumulated yet.
+                incomingLatencyWeighted.merge(client.id(), 0.0, Double::sum);
             }
 
             double totalAttempted = 0;
             double totalFailed = 0;
             double totalLatencyWeighted = 0;
             double totalSucceeded = 0;
-
+            // Stores latency observations completed during this tick only.
+            // Used for calculating tick-level p50, p95 and p99.
+            List<Double> tickLatencySamples = new ArrayList<>();
             for (GraphNode node : topoOrder) {
                 double arriving = incomingRate.getOrDefault(node.id(), 0.0);
                 double arrivingFailed = incomingFailedRate.getOrDefault(node.id(), 0.0);
+
+                double incomingLatency = incomingLatencyWeighted.getOrDefault(node.id(), 0.0);
+
+                // Convert latency-weighted traffic into the average latency already
+                // accumulated by requests reaching this node.
+                double averageIncomingLatency = arriving <= 0
+                        ? 0.0
+                        : incomingLatency / arriving;
+
                 boolean isClient = "client".equals(node.type());
 
                 InjectedFailure killOrDegrade = activeNodeFailures.get(node.id());
@@ -89,13 +107,17 @@ public class SimulationEngine {
                         ? killOrDegrade.extraMs()
                         : 0;
                 double nodeLatency = baseLatency + extraLatency;
+                // End-to-end latency up to this node = latency already accumulated
+                // by the request + latency introduced by the current node.
+                double cumulativeLatency = averageIncomingLatency + nodeLatency;
 
                 double loadPct = effectiveCapacity <= 0 ? (arriving > 0 ? 200 : 0)
                         : Math.min(200, (arriving / effectiveCapacity) * 100);
                 double totalIn = arriving + arrivingFailed;
                 double errorRatePct = totalIn <= 0 ? 0 : Math.min(100, (failedHere / totalIn) * 100);
 
-                nodeStats.put(node.id(), new NodeTickStats(round2(loadPct), round2(errorRatePct), round2(nodeLatency), killed, replicas));
+                nodeStats.put(node.id(), new NodeTickStats(round2(loadPct), round2(errorRatePct), round2(nodeLatency),
+                        killed, replicas));
 
                 if ("autoScalingGroup".equals(node.type())) {
                     double targetLoad = node.getNumber("targetLoadPct", 70);
@@ -109,12 +131,26 @@ public class SimulationEngine {
                         asgReplicas.put(node.id(), replicas);
                     }
                 }
-
                 if (graph.outgoing(node.id()).isEmpty() && !isClient) {
                     totalAttempted += arriving + arrivingFailed;
                     totalFailed += failedHere;
                     totalSucceeded += accepted;
                     totalLatencyWeighted += accepted * nodeLatency;
+
+                    // Store each successful request's latency so that
+                    // percentiles are calculated from the actual latency distribution.
+                    int successfulRequests = (int) Math.round(accepted);
+                    for (int i = 0; i < successfulRequests; i++) {
+                        // At a terminal node, the request's latency represents the complete
+                        // end-to-end latency accumulated across the path.
+                        double requestLatency = cumulativeLatency;
+
+                        // Keep the sample for the current tick.
+                        tickLatencySamples.add(requestLatency);
+
+                        // Keep the sample for the complete simulation run.
+                        latencySamples.add(requestLatency);
+                    }
                 }
 
                 maxLoadByNode.merge(node.id(), loadPct, Math::max);
@@ -130,9 +166,22 @@ public class SimulationEngine {
                         double forwarded = sharePerEdge - dropped;
 
                         incomingRate.merge(edge.target(), forwarded, Double::sum);
-                        incomingFailedRate.merge(edge.target(), failedSharePerEdge + dropped, Double::sum);
+                        incomingFailedRate.merge(
+                                edge.target(),
+                                failedSharePerEdge + dropped,
+                                Double::sum);
 
-                        edgeStats.put(edge.id(), new EdgeTickStats(round2(forwarded), round2(nodeLatency)));
+                        // Propagate the accumulated end-to-end latency with the forwarded traffic.
+                        // Each forwarded request arriving at the next node has already experienced
+                        // the latency accumulated up to the current node.
+                        incomingLatencyWeighted.merge(
+                                edge.target(),
+                                forwarded * cumulativeLatency,
+                                Double::sum);
+
+                        edgeStats.put(
+                                edge.id(),
+                                new EdgeTickStats(round2(forwarded), round2(nodeLatency)));
                     }
                 } else if (!isClient) {
                     // terminal node — nothing to forward
@@ -141,18 +190,23 @@ public class SimulationEngine {
 
             double tickRps = totalSucceeded * SimulationConfig.TICKS_PER_SECOND;
             double tickErrorRate = totalAttempted <= 0 ? 0 : (totalFailed / totalAttempted) * 100;
-            double p50 = totalSucceeded <= 0 ? 0 : totalLatencyWeighted / totalSucceeded;
-            double p95 = p50 * 1.5;
-            double p99 = p50 * 2.2;
 
+            // Calculate percentiles using only requests completed in this tick.
+            double p50 = percentile(tickLatencySamples, 0.50);
+            double p95 = percentile(tickLatencySamples, 0.95);
+            double p99 = percentile(tickLatencySamples, 0.99);
             sumRps += tickRps;
             sumErrorRate += tickErrorRate;
-            sumP95 += p95;
 
             ticks.add(new Tick(t, nodeStats, edgeStats,
-                    new GlobalTickStats(round2(tickRps), round2(tickErrorRate), round2(p50), round2(p95), round2(p99))));
+                    new GlobalTickStats(round2(tickRps), round2(tickErrorRate), round2(p50), round2(p95),
+                            round2(p99))));
         }
-
+        // Calculate latency percentiles from every successful request
+        // collected during the complete simulation run.
+        double overallP50 = percentile(latencySamples, 0.50);
+        double overallP95 = percentile(latencySamples, 0.95);
+        double overallP99 = percentile(latencySamples, 0.99);
         int n = Math.max(1, ticks.size());
         String bottleneckId = maxLoadByNode.entrySet().stream()
                 .max(Map.Entry.comparingByValue())
@@ -169,11 +223,44 @@ public class SimulationEngine {
                 .toList();
 
         SimulationSummary summary = new SimulationSummary(
-                round2(sumRps / n), round2(sumErrorRate / n), round2(sumP95 / n),
-                bottleneckId, round2(bottleneckLoad), spofs
-        );
+                round2(sumRps / n),
+                round2(sumErrorRate / n),
+                round2(overallP50),
+                round2(overallP95),
+                round2(overallP99),
+                bottleneckId,
+                round2(bottleneckLoad),
+                spofs);
 
         return new SimulationResult(ticks, summary);
+    }
+
+    /**
+     * Calculates a percentile using the nearest-rank method.
+     *
+     * The latency observations are sorted first, then the position is
+     * determined using: rank = ceil(percentile * numberOfSamples).
+     *
+     * Example:
+     * p95 with 100 samples -> 95th ranked latency value.
+     */
+    private double percentile(List<Double> values, double percentile) {
+        // No observations means there is no percentile to calculate.
+        if (values == null || values.isEmpty()) {
+            return 0.0;
+        }
+
+        // Sort a copy so that the original latency sample list is unchanged.
+        List<Double> sorted = new ArrayList<>(values);
+        Collections.sort(sorted);
+
+        // Convert the percentile into a nearest-rank position.
+        int rank = (int) Math.ceil(percentile * sorted.size());
+
+        // Convert the 1-based rank into a 0-based Java list index.
+        int index = Math.max(0, rank - 1);
+
+        return sorted.get(index);
     }
 
     private boolean isUnreplicated(GraphNode node) {
@@ -186,14 +273,16 @@ public class SimulationEngine {
 
     private boolean hasMultipleDependents(SimulationGraph graph, GraphNode node) {
         // A node fed by a load balancer/gateway (i.e. has upstream fan-in) is presumed
-        // to be the sole handler for that traffic — flag it unless it's explicitly replicated.
+        // to be the sole handler for that traffic — flag it unless it's explicitly
+        // replicated.
         return !graph.incoming(node.id()).isEmpty();
     }
 
     private Map<String, InjectedFailure> activeFailuresByNode(SimulationConfig config, int tick) {
         Map<String, InjectedFailure> map = new HashMap<>();
         for (InjectedFailure f : config.injectedFailures()) {
-            if (f.nodeId() != null && f.activeAt(tick)) map.put(f.nodeId(), f);
+            if (f.nodeId() != null && f.activeAt(tick))
+                map.put(f.nodeId(), f);
         }
         return map;
     }
@@ -201,7 +290,8 @@ public class SimulationEngine {
     private Map<String, InjectedFailure> activeFailuresByEdge(SimulationConfig config, int tick) {
         Map<String, InjectedFailure> map = new HashMap<>();
         for (InjectedFailure f : config.injectedFailures()) {
-            if (f.edgeId() != null && f.activeAt(tick)) map.put(f.edgeId(), f);
+            if (f.edgeId() != null && f.activeAt(tick))
+                map.put(f.edgeId(), f);
         }
         return map;
     }
@@ -215,11 +305,12 @@ public class SimulationEngine {
             case "apiGateway" -> node.getNumber("rateLimit", 500);
             case "waf" -> node.getNumber("maxThroughput", 2000);
             case "ingress" -> node.getNumber("maxThroughput", 1500);
-            case "service" -> node.getNumber("maxConcurrency", 500);
-            case "worker" -> node.getNumber("maxConcurrency", 300);
-            case "serverless" -> node.getNumber("maxConcurrency", 1000);
-            case "autoScalingGroup", "containerOrchestrator" -> node.getNumber("baseCapacityPerReplica", 500);
-            case "cronJob" -> node.getNumber("maxConcurrency", 50);
+            case "service" -> concurrencyCapacityPerTick(node, "maxConcurrency", 500);
+            case "worker" -> concurrencyCapacityPerTick(node, "maxConcurrency", 300);
+            case "serverless" -> concurrencyCapacityPerTick(node, "maxConcurrency", 1000);
+            case "autoScalingGroup", "containerOrchestrator" -> concurrencyCapacityPerTick(
+                    node, "baseCapacityPerReplica", 500);
+            case "cronJob" -> concurrencyCapacityPerTick(node, "maxConcurrency", 50);
             case "cache" -> Double.MAX_VALUE;
             case "database" -> node.getNumber("maxConnections", 200);
             case "dataWarehouse" -> node.getNumber("maxConnections", 100);
@@ -235,6 +326,28 @@ public class SimulationEngine {
             case "paymentGateway" -> node.getNumber("maxThroughput", 150);
             default -> 1000;
         };
+    }
+
+    private double concurrencyCapacityPerTick(GraphNode node, String concurrencyKey, double defaultConcurrency) {
+        double effectiveConcurrency = node.getNumber(concurrencyKey, defaultConcurrency);
+        if (!Double.isFinite(effectiveConcurrency) || effectiveConcurrency <= 0) {
+            return 0;
+        }
+
+        // Use the midpoint of the configured latency range as representative service
+        // time.
+        double minLatencyMs = node.getNumber("minLatencyMs", 20);
+        double maxLatencyMs = node.getNumber("maxLatencyMs", 80);
+        double averageLatencySeconds = ((minLatencyMs + maxLatencyMs) / 2.0) / 1000.0;
+        if (!Double.isFinite(averageLatencySeconds) || averageLatencySeconds <= 0) {
+            return 0;
+        }
+
+        double capacityRps = effectiveConcurrency / averageLatencySeconds;
+        if (!Double.isFinite(capacityRps)) {
+            return Double.MAX_VALUE;
+        }
+        return Math.min(Double.MAX_VALUE, capacityRps / SimulationConfig.TICKS_PER_SECOND);
     }
 
     private double latencyOf(GraphNode node, Random random) {
@@ -270,8 +383,10 @@ public class SimulationEngine {
             case "eventBus" -> 2 + random.nextDouble() * 5;
             case "webhook" -> node.getNumber("extraLatencyMs", 20) + random.nextDouble() * 30;
             case "monitoring", "logging" -> 1 + random.nextDouble() * 2;
-            case "thirdPartyApi" -> node.getNumber("minLatencyMs", 50) + random.nextDouble() * Math.max(0, node.getNumber("maxLatencyMs", 400) - node.getNumber("minLatencyMs", 50));
-            case "paymentGateway" -> node.getNumber("minLatencyMs", 100) + random.nextDouble() * Math.max(0, node.getNumber("maxLatencyMs", 600) - node.getNumber("minLatencyMs", 100));
+            case "thirdPartyApi" -> node.getNumber("minLatencyMs", 50) + random.nextDouble()
+                    * Math.max(0, node.getNumber("maxLatencyMs", 400) - node.getNumber("minLatencyMs", 50));
+            case "paymentGateway" -> node.getNumber("minLatencyMs", 100) + random.nextDouble()
+                    * Math.max(0, node.getNumber("maxLatencyMs", 600) - node.getNumber("minLatencyMs", 100));
             default -> 5;
         };
     }
@@ -283,4 +398,5 @@ public class SimulationEngine {
     private double round2(double v) {
         return Math.round(v * 100.0) / 100.0;
     }
+
 }

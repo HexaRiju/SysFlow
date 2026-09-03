@@ -14,14 +14,16 @@ public record AnalyzeRequest(GraphJson graphJson, SimulationSummaryJson lastSimu
     public record EdgeJson(String id, String source, String target) {
     }
 
-    /** Mirrors dev.sysflow.simulation.model.SimulationSummary; may be null if no simulation has run yet. */
+    /**
+     * Mirrors dev.sysflow.simulation.model.SimulationSummary; may be null if no
+     * simulation has run yet.
+     */
     public record SimulationSummaryJson(
             Double avgRps,
             Double avgErrorRatePct,
-            Double avgP95,
+            Double p95,
             String bottleneckNodeId,
             Double bottleneckLoadPct,
-            List<String> singlePointsOfFailure
-    ) {
+            List<String> singlePointsOfFailure) {
     }
 }
