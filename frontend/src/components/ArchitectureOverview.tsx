@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Position,
   getBezierPath,
@@ -73,6 +73,27 @@ export default function ArchitectureOverview({
 }: ArchitectureOverviewProps) {
   const { theme } = useTheme()
   const isDark = theme === 'dark'
+
+  const [isMinimized, setIsMinimized] = useState(() => {
+    try {
+      return localStorage.getItem('sysflow:minimap_minimized') === 'true'
+    } catch {
+      return false
+    }
+  })
+
+  const toggleMinimized = () => {
+    setIsMinimized((prev) => {
+      const next = !prev
+      try {
+        localStorage.setItem('sysflow:minimap_minimized', String(next))
+      } catch {
+        // ignore
+      }
+      return next
+    })
+  }
+
   const layout = useMemo(() => {
     if (nodes.length === 0) {
       return null
@@ -130,16 +151,50 @@ export default function ArchitectureOverview({
 
   return (
     <div
-      className="sysflow-minimap absolute bottom-4 right-4 z-10 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-lg"
+      className={`sysflow-minimap absolute bottom-4 right-4 z-10 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-lg transition-all duration-200 ${
+        isMinimized ? 'cursor-pointer select-none' : ''
+      }`}
       style={{
-        width: VIEW_WIDTH,
-        height: VIEW_HEIGHT,
+        width: isMinimized ? 140 : VIEW_WIDTH,
+        height: isMinimized ? HEADER_HEIGHT : VIEW_HEIGHT,
       }}
+      onClick={isMinimized ? toggleMinimized : undefined}
     >
-      <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-800 px-3 py-2">
-        <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">Minimap</span>
-        <span className="text-[9px] text-zinc-300 dark:text-zinc-600">Architecture overview</span>
+      <div
+        className={`flex h-[34px] items-center justify-between px-3 ${
+          isMinimized ? '' : 'border-b border-zinc-100 dark:border-zinc-800'
+        }`}
+      >
+        <div className="flex items-center gap-1.5">
+          <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">Minimap</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {!isMinimized && (
+            <span className="text-[9px] text-zinc-300 dark:text-zinc-600">Architecture overview</span>
+          )}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              toggleMinimized()
+            }}
+            title={isMinimized ? 'Expand minimap' : 'Minimize minimap'}
+            aria-label={isMinimized ? 'Expand minimap' : 'Minimize minimap'}
+            className="flex h-5 w-5 items-center justify-center rounded text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-300 transition-colors"
+          >
+            {isMinimized ? (
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="18 15 12 9 6 15" />
+              </svg>
+            ) : (
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            )}
+          </button>
+        </div>
       </div>
+      {!isMinimized && (
       <svg
         width={VIEW_WIDTH}
         height={DRAW_HEIGHT}
@@ -329,6 +384,7 @@ export default function ArchitectureOverview({
           )}
         </g>
       </svg>
+      )}
     </div>
   )
 }
