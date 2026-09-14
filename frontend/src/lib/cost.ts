@@ -45,11 +45,25 @@ export function replicasOf(componentType: string, config: Record<string, unknown
   return 1
 }
 
-export function estimateNodeMonthlyCost(type: ComponentType, replicas = 1): number {
-  const base = MONTHLY_COST_USD[type] ?? 10
-  return base * Math.max(1, replicas)
+const SCALE_MULTIPLIERS: Record<string, number> = {
+  'XS_2GB': 0.25,
+  'SM_4GB': 0.5,
+  'MD_8GB': 1.0,
+  'LG_16GB': 2.0,
+  'XL_32GB': 4.0,
 }
 
-export function estimateTotalMonthlyCost(nodes: { type: ComponentType; replicas?: number }[]): number {
-  return nodes.reduce((sum, n) => sum + estimateNodeMonthlyCost(n.type, n.replicas ?? 1), 0)
+export function estimateNodeMonthlyCost(type: ComponentType, replicas = 1, config?: Record<string, unknown>): number {
+  const base = MONTHLY_COST_USD[type] ?? 10
+  
+  let scaleMultiplier = 1.0;
+  if (config?.scale && config.scale !== 'Auto') {
+      scaleMultiplier = SCALE_MULTIPLIERS[String(config.scale)] ?? 1.0;
+  }
+  
+  return base * scaleMultiplier * Math.max(1, replicas)
+}
+
+export function estimateTotalMonthlyCost(nodes: { type: ComponentType; replicas?: number; config?: Record<string, unknown> }[]): number {
+  return nodes.reduce((sum, n) => sum + estimateNodeMonthlyCost(n.type, n.replicas ?? 1, n.config), 0)
 }

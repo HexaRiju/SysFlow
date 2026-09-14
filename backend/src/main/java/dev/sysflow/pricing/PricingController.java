@@ -1,9 +1,13 @@
 package dev.sysflow.pricing;
 
 import dev.sysflow.common.CostModel;
+import dev.sysflow.pricing.dto.PricingCompareRequest;
+import dev.sysflow.pricing.dto.PricingCompareResponse;
 import dev.sysflow.pricing.dto.PricingEstimateRequest;
 import dev.sysflow.pricing.dto.PricingEstimateResponse;
+import dev.sysflow.pricing.dto.ScalePricingResponse;
 import dev.sysflow.simulation.model.GraphNode;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -14,10 +18,10 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * POST /api/pricing/estimate — real Azure Retail Prices for the handful of component
- * categories with a verified SKU mapping (see AzurePricingClient), illustrative CostModel
- * numbers for everything else. Every node in the response is tagged with its actual source
- * so the frontend never presents an illustrative guess as if it were real pricing.
+ * Pricing API:
+ * - POST /api/pricing/estimate — real Azure Retail Prices with illustrative fallback (legacy)
+ * - POST /api/pricing/compare — full multi-cloud end-to-end pricing pipeline (AWS, GCP, Azure)
+ *   with both provisioned instance costs and dynamic simulation-derived traffic/egress costs.
  */
 @RestController
 @RequestMapping("/api/pricing")
@@ -33,10 +37,17 @@ public class PricingController {
 
     private final CostModel costModel;
     private final AzurePricingClient pricingClient;
+    private final EndToEndCostPipeline endToEndPipeline;
 
-    public PricingController(CostModel costModel, AzurePricingClient pricingClient) {
+    public PricingController(CostModel costModel, AzurePricingClient pricingClient, EndToEndCostPipeline endToEndPipeline) {
         this.costModel = costModel;
         this.pricingClient = pricingClient;
+        this.endToEndPipeline = endToEndPipeline;
+    }
+
+    @PostMapping("/compare")
+    public PricingCompareResponse compare(@RequestBody PricingCompareRequest request) {
+        return endToEndPipeline.compare(request);
     }
 
     @PostMapping("/estimate")
@@ -48,34 +59,81 @@ public class PricingController {
         return new PricingEstimateResponse(total, "azure", "eastus", nodeCosts);
     }
 
-    /** Below this, SMALL; below MEDIUM_MAX, MEDIUM; otherwise LARGE. Thresholds are deliberately rough — this is a tier pick, not a sizing calculator. */
-    private AzurePricingClient.Tier tierFor(double configuredSize, double mediumMax, double largeMax) {
-        if (configuredSize <= mediumMax) return AzurePricingClient.Tier.SMALL;
-        if (configuredSize <= largeMax) return AzurePricingClient.Tier.MEDIUM;
-        return AzurePricingClient.Tier.LARGE;
+    @GetMapping("/scale-tiers")
+    public ScalePricingResponse getScaleTiers() {
+        Map<String, ScalePricingResponse.ProviderScalePricing> providersMap = new java.util.LinkedHashMap<>();
+        
+        for (CloudPricingProvider provider : List.of(new AwsPricingClient(), new GcpPricingClient(), pricingClient)) {
+            Map<String, ScalePricingResponse.CategoryPricing> categories = new java.util.LinkedHashMap<>();
+            
+            categories.put("compute", mapCategory(provider.allComputePrices()));
+            categories.put("database", mapCategory(provider.allDatabasePrices()));
+            categories.put("cache", mapCategory(provider.allCachePrices()));
+            
+            providersMap.put(provider.providerId(), new ScalePricingResponse.ProviderScalePricing(
+                    provider.providerId(), provider.providerName(), provider.defaultRegion(), categories
+            ));
+        }
+        return new ScalePricingResponse(providersMap);
     }
 
-    private static final Map<AzurePricingClient.Tier, String> COMPUTE_SKU_LABEL = Map.of(
-            AzurePricingClient.Tier.SMALL, "Standard_B2s",
-            AzurePricingClient.Tier.MEDIUM, "Standard_D2s_v3",
-            AzurePricingClient.Tier.LARGE, "Standard_D4s_v3");
-    private static final Map<AzurePricingClient.Tier, String> DATABASE_SKU_LABEL = Map.of(
-            AzurePricingClient.Tier.SMALL, "Burstable B1ms",
-            AzurePricingClient.Tier.MEDIUM, "Burstable B2ms",
-            AzurePricingClient.Tier.LARGE, "Burstable B4ms");
-    private static final Map<AzurePricingClient.Tier, String> CACHE_SKU_LABEL = Map.of(
-            AzurePricingClient.Tier.SMALL, "Basic C0",
-            AzurePricingClient.Tier.MEDIUM, "Basic C1",
-            AzurePricingClient.Tier.LARGE, "Basic C2");
+    private ScalePricingResponse.CategoryPricing mapCategory(Map<ScaleTier, SkuPrice> prices) {
+        Map<String, ScalePricingResponse.TierPrice> tiers = new java.util.LinkedHashMap<>();
+        for (Map.Entry<ScaleTier, SkuPrice> entry : prices.entrySet()) {
+            SkuPrice p = entry.getValue();
+            tiers.put(entry.getKey().label(), new ScalePricingResponse.TierPrice(
+                    p.hourlyUsd(), p.hourlyUsd() * 730.0, p.skuName(), p.description()
+            ));
+        }
+        return new ScalePricingResponse.CategoryPricing(tiers);
+    }
+
+    private ScaleTier tierFor(double configuredSize, double mediumMax, double largeMax) {
+        if (configuredSize <= mediumMax * 0.5) return ScaleTier.XS_2GB;
+        if (configuredSize <= mediumMax) return ScaleTier.SM_4GB;
+        if (configuredSize <= largeMax * 0.5) return ScaleTier.MD_8GB;
+        if (configuredSize <= largeMax) return ScaleTier.LG_16GB;
+        return ScaleTier.XL_32GB;
+    }
+
+    private static final Map<ScaleTier, String> COMPUTE_SKU_LABEL = Map.of(
+            ScaleTier.XS_2GB, "Standard_B1ms",
+            ScaleTier.SM_4GB, "Standard_B2s",
+            ScaleTier.MD_8GB, "Standard_D2s_v3",
+            ScaleTier.LG_16GB, "Standard_D4s_v3",
+            ScaleTier.XL_32GB, "Standard_D8s_v3");
+    private static final Map<ScaleTier, String> DATABASE_SKU_LABEL = Map.of(
+            ScaleTier.XS_2GB, "Burstable B1ms",
+            ScaleTier.SM_4GB, "Burstable B2ms",
+            ScaleTier.MD_8GB, "Burstable B4ms",
+            ScaleTier.LG_16GB, "General Purpose D2ds_v4",
+            ScaleTier.XL_32GB, "General Purpose D4ds_v4");
+    private static final Map<ScaleTier, String> CACHE_SKU_LABEL = Map.of(
+            ScaleTier.XS_2GB, "Basic C0",
+            ScaleTier.SM_4GB, "Basic C1",
+            ScaleTier.MD_8GB, "Basic C2",
+            ScaleTier.LG_16GB, "Basic C3",
+            ScaleTier.XL_32GB, "Basic C4");
+
+    private ScaleTier parseScale(String scale, double configuredSize, double mediumMax, double largeMax) {
+        if (scale == null || "Auto".equals(scale) || scale.isBlank()) {
+            return tierFor(configuredSize, mediumMax, largeMax);
+        }
+        try {
+            return ScaleTier.valueOf(scale);
+        } catch (IllegalArgumentException e) {
+            return tierFor(configuredSize, mediumMax, largeMax);
+        }
+    }
 
     private PricingEstimateResponse.NodeCost costOf(PricingEstimateRequest.NodeJson n) {
         GraphNode node = new GraphNode(n.id(), n.type(), n.config());
         int units = costModel.unitsOf(node);
+        String explicitScale = node.getString("scale", "Auto");
 
         if (GENERIC_COMPUTE_TYPES.contains(n.type())) {
-            // maxConcurrency (service/worker/serverless) or maxThroughput (queue/cronJob/autoScalingGroup) — whichever the type actually configures.
             double configuredSize = Math.max(node.getNumber("maxConcurrency", 0), node.getNumber("maxThroughput", 0));
-            var tier = tierFor(configuredSize, 800, 3000);
+            var tier = parseScale(explicitScale, configuredSize, 800, 3000);
             var real = pricingClient.monthlyPriceUsd(AzurePricingClient.computeCategoryFor(tier));
             if (real.isPresent()) {
                 return new PricingEstimateResponse.NodeCost(n.id(), n.type(), real.get() * units, "real",
@@ -83,7 +141,7 @@ public class PricingController {
             }
         } else if (MANAGED_DATABASE_TYPES.contains(n.type())) {
             double configuredSize = node.getNumber("maxConnections", 0);
-            var tier = tierFor(configuredSize, 100, 500);
+            var tier = parseScale(explicitScale, configuredSize, 100, 500);
             var real = pricingClient.monthlyPriceUsd(AzurePricingClient.databaseCategoryFor(tier));
             if (real.isPresent()) {
                 return new PricingEstimateResponse.NodeCost(n.id(), n.type(), real.get() * units, "real",
@@ -91,7 +149,7 @@ public class PricingController {
             }
         } else if ("cache".equals(n.type())) {
             double configuredSize = node.getNumber("maxThroughput", node.getNumber("maxConnections", 0));
-            var tier = tierFor(configuredSize, 1000, 5000);
+            var tier = parseScale(explicitScale, configuredSize, 1000, 5000);
             var real = pricingClient.monthlyPriceUsd(AzurePricingClient.cacheCategoryFor(tier));
             if (real.isPresent()) {
                 return new PricingEstimateResponse.NodeCost(n.id(), n.type(), real.get() * units, "real",

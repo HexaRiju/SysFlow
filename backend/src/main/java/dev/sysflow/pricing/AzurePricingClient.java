@@ -9,24 +9,17 @@ import org.springframework.web.client.RestClient;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.EnumMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Real hourly prices from Azure's public Retail Prices API (no auth required:
- * https://prices.azure.com/api/retail/prices). Each SKU filter below was verified live
- * against the real API before being hardcoded — see the commit that introduced this file
- * for the discovery queries. Region fixed to eastus for a single consistent baseline.
- *
- * Only a handful of component categories get real pricing (see PricingCategory) - everything
- * else stays on CostModel's illustrative numbers. This is a deliberate scope limit, not an
- * oversight: mapping all 30 component types to verified real SKUs would require discovering
- * and validating a filter for each one individually, and a wrong guess would silently return
- * no price rather than a wrong one - so only verified mappings are included.
+ * Real hourly prices from Azure's public Retail Prices API.
+ * Region fixed to eastus for a single consistent baseline.
  */
 @Component
-public class AzurePricingClient {
+public class AzurePricingClient implements CloudPricingProvider {
 
     private static final Logger log = LoggerFactory.getLogger(AzurePricingClient.class);
     private static final double HOURS_PER_MONTH = 730;
@@ -53,38 +46,28 @@ public class AzurePricingClient {
     }
 
     public enum PricingCategory {
-        /**
-         * Standard_B2s Linux — a small general-purpose VM, standing in for a lightly configured
-         * generic compute node. Tier picked by PricingController from the node's maxConcurrency/
-         * maxThroughput config; each tier's SKU was verified live against the real API (see the
-         * commit that introduced tiering for the discovery queries) before being hardcoded.
-         */
-        GENERIC_COMPUTE_SMALL("armRegionName eq 'eastus' and serviceName eq 'Virtual Machines' and armSkuName eq 'Standard_B2s' and priceType eq 'Consumption'", "Virtual Machines BS Series", null),
-        /** Standard_D2s_v3 Linux, pay-as-you-go (excludes the Spot/Low-Priority/Windows meters that share the same product name). */
-        GENERIC_COMPUTE_MEDIUM("armRegionName eq 'eastus' and serviceName eq 'Virtual Machines' and armSkuName eq 'Standard_D2s_v3' and priceType eq 'Consumption'", "Virtual Machines DSv3 Series", "D2s v3"),
-        /** Standard_D4s_v3 Linux, pay-as-you-go. */
-        GENERIC_COMPUTE_LARGE("armRegionName eq 'eastus' and serviceName eq 'Virtual Machines' and armSkuName eq 'Standard_D4s_v3' and priceType eq 'Consumption'", "Virtual Machines DSv3 Series", "D4s v3"),
+        GENERIC_COMPUTE_XS_2GB("armRegionName eq 'eastus' and serviceName eq 'Virtual Machines' and armSkuName eq 'Standard_B1ms' and priceType eq 'Consumption'", "Virtual Machines BS Series", null),
+        GENERIC_COMPUTE_SM_4GB("armRegionName eq 'eastus' and serviceName eq 'Virtual Machines' and armSkuName eq 'Standard_B2s' and priceType eq 'Consumption'", "Virtual Machines BS Series", null),
+        GENERIC_COMPUTE_MD_8GB("armRegionName eq 'eastus' and serviceName eq 'Virtual Machines' and armSkuName eq 'Standard_D2s_v3' and priceType eq 'Consumption'", "Virtual Machines DSv3 Series", "D2s v3"),
+        GENERIC_COMPUTE_LG_16GB("armRegionName eq 'eastus' and serviceName eq 'Virtual Machines' and armSkuName eq 'Standard_D4s_v3' and priceType eq 'Consumption'", "Virtual Machines DSv3 Series", "D4s v3"),
+        GENERIC_COMPUTE_XL_32GB("armRegionName eq 'eastus' and serviceName eq 'Virtual Machines' and armSkuName eq 'Standard_D8s_v3' and priceType eq 'Consumption'", "Virtual Machines DSv3 Series", "D8s v3"),
 
-        /** Postgres Flexible Server, Burstable B1ms — stands in for a lightly configured managed relational/analytical store. */
-        MANAGED_DATABASE_SMALL("armRegionName eq 'eastus' and serviceName eq 'Azure Database for PostgreSQL' and skuName eq 'B1MS'", "Burstable BS Series", null),
-        /** Postgres Flexible Server, Burstable B2ms. */
-        MANAGED_DATABASE_MEDIUM("armRegionName eq 'eastus' and serviceName eq 'Azure Database for PostgreSQL' and skuName eq 'B2ms'", "Burstable BS Series", null),
-        /** Postgres Flexible Server, Burstable B4ms. */
-        MANAGED_DATABASE_LARGE("armRegionName eq 'eastus' and serviceName eq 'Azure Database for PostgreSQL' and skuName eq 'B4ms'", "Burstable BS Series", null),
+        MANAGED_DATABASE_XS_2GB("armRegionName eq 'eastus' and serviceName eq 'Azure Database for PostgreSQL' and skuName eq 'B1ms'", "Burstable BS Series", null),
+        MANAGED_DATABASE_SM_4GB("armRegionName eq 'eastus' and serviceName eq 'Azure Database for PostgreSQL' and skuName eq 'B2ms'", "Burstable BS Series", null),
+        MANAGED_DATABASE_MD_8GB("armRegionName eq 'eastus' and serviceName eq 'Azure Database for PostgreSQL' and skuName eq 'B4ms'", "Burstable BS Series", null),
+        MANAGED_DATABASE_LG_16GB("armRegionName eq 'eastus' and serviceName eq 'Azure Database for PostgreSQL' and skuName eq 'D2ds_v4'", "General Purpose Ddsv4 Series", null),
+        MANAGED_DATABASE_XL_32GB("armRegionName eq 'eastus' and serviceName eq 'Azure Database for PostgreSQL' and skuName eq 'D4ds_v4'", "General Purpose Ddsv4 Series", null),
 
-        /** Azure Cache for Redis, Basic C0 — the smallest managed cache tier. */
-        CACHE_SMALL("armRegionName eq 'eastus' and serviceName eq 'Redis Cache' and skuName eq 'C0'", "Azure Redis Cache Basic", null),
-        /** Azure Cache for Redis, Basic C1. */
-        CACHE_MEDIUM("armRegionName eq 'eastus' and serviceName eq 'Redis Cache' and skuName eq 'C1'", "Azure Redis Cache Basic", null),
-        /** Azure Cache for Redis, Basic C2. */
-        CACHE_LARGE("armRegionName eq 'eastus' and serviceName eq 'Redis Cache' and skuName eq 'C2'", "Azure Redis Cache Basic", null),
+        CACHE_XS_2GB("armRegionName eq 'eastus' and serviceName eq 'Redis Cache' and skuName eq 'C0'", "Azure Redis Cache Basic", null),
+        CACHE_SM_4GB("armRegionName eq 'eastus' and serviceName eq 'Redis Cache' and skuName eq 'C1'", "Azure Redis Cache Basic", null),
+        CACHE_MD_8GB("armRegionName eq 'eastus' and serviceName eq 'Redis Cache' and skuName eq 'C2'", "Azure Redis Cache Basic", null),
+        CACHE_LG_16GB("armRegionName eq 'eastus' and serviceName eq 'Redis Cache' and skuName eq 'C3'", "Azure Redis Cache Basic", null),
+        CACHE_XL_32GB("armRegionName eq 'eastus' and serviceName eq 'Redis Cache' and skuName eq 'C4'", "Azure Redis Cache Basic", null),
 
-        /** Blob Storage, Hot tier, LRS — priced per GB/month, not per hour; see monthlyRateForGbMonth. */
         OBJECT_STORAGE("armRegionName eq 'eastus' and serviceName eq 'Storage' and skuName eq 'Hot LRS' and meterName eq 'Hot LRS Data Stored'", "Blob Storage", null);
 
         final String filter;
         final String productNameMatch;
-        /** When set, only an item whose meterName exactly equals this is accepted — needed for SKUs (like D-series VMs) where Spot/Low-Priority/Windows variants share the same productName. */
         final String exactMeterName;
 
         PricingCategory(String filter, String productNameMatch, String exactMeterName) {
@@ -94,34 +77,36 @@ public class AzurePricingClient {
         }
     }
 
-    /** Size tier picked by PricingController from a node's configured concurrency/throughput/connections. */
-    public enum Tier { SMALL, MEDIUM, LARGE }
-
-    public static PricingCategory computeCategoryFor(Tier tier) {
+    public static PricingCategory computeCategoryFor(ScaleTier tier) {
         return switch (tier) {
-            case SMALL -> PricingCategory.GENERIC_COMPUTE_SMALL;
-            case MEDIUM -> PricingCategory.GENERIC_COMPUTE_MEDIUM;
-            case LARGE -> PricingCategory.GENERIC_COMPUTE_LARGE;
+            case XS_2GB -> PricingCategory.GENERIC_COMPUTE_XS_2GB;
+            case SM_4GB -> PricingCategory.GENERIC_COMPUTE_SM_4GB;
+            case MD_8GB -> PricingCategory.GENERIC_COMPUTE_MD_8GB;
+            case LG_16GB -> PricingCategory.GENERIC_COMPUTE_LG_16GB;
+            case XL_32GB -> PricingCategory.GENERIC_COMPUTE_XL_32GB;
         };
     }
 
-    public static PricingCategory databaseCategoryFor(Tier tier) {
+    public static PricingCategory databaseCategoryFor(ScaleTier tier) {
         return switch (tier) {
-            case SMALL -> PricingCategory.MANAGED_DATABASE_SMALL;
-            case MEDIUM -> PricingCategory.MANAGED_DATABASE_MEDIUM;
-            case LARGE -> PricingCategory.MANAGED_DATABASE_LARGE;
+            case XS_2GB -> PricingCategory.MANAGED_DATABASE_XS_2GB;
+            case SM_4GB -> PricingCategory.MANAGED_DATABASE_SM_4GB;
+            case MD_8GB -> PricingCategory.MANAGED_DATABASE_MD_8GB;
+            case LG_16GB -> PricingCategory.MANAGED_DATABASE_LG_16GB;
+            case XL_32GB -> PricingCategory.MANAGED_DATABASE_XL_32GB;
         };
     }
 
-    public static PricingCategory cacheCategoryFor(Tier tier) {
+    public static PricingCategory cacheCategoryFor(ScaleTier tier) {
         return switch (tier) {
-            case SMALL -> PricingCategory.CACHE_SMALL;
-            case MEDIUM -> PricingCategory.CACHE_MEDIUM;
-            case LARGE -> PricingCategory.CACHE_LARGE;
+            case XS_2GB -> PricingCategory.CACHE_XS_2GB;
+            case SM_4GB -> PricingCategory.CACHE_SM_4GB;
+            case MD_8GB -> PricingCategory.CACHE_MD_8GB;
+            case LG_16GB -> PricingCategory.CACHE_LG_16GB;
+            case XL_32GB -> PricingCategory.CACHE_XL_32GB;
         };
     }
 
-    /** Real hourly USD rate for a compute/database/cache category, or empty if the live lookup fails. */
     public Optional<Double> hourlyPriceUsd(PricingCategory category) {
         CachedPrice cached = cache.get(category);
         if (cached != null && cached.isFresh()) {
@@ -133,12 +118,10 @@ public class AzurePricingClient {
         }).or(() -> cached != null ? Optional.of(cached.hourlyUsd) : Optional.empty());
     }
 
-    /** Real monthly USD estimate for a compute/database/cache category (hourly rate x 730h/month). */
     public Optional<Double> monthlyPriceUsd(PricingCategory category) {
         return hourlyPriceUsd(category).map(hourly -> hourly * HOURS_PER_MONTH);
     }
 
-    /** Object storage is priced per GB/month, not per hour — assumedGb lets the caller pick a volume. */
     public Optional<Double> monthlyStorageCostUsd(double assumedGb) {
         return hourlyPriceUsd(PricingCategory.OBJECT_STORAGE).map(perGbMonth -> perGbMonth * assumedGb);
     }
@@ -158,7 +141,6 @@ public class AzurePricingClient {
                     return Optional.of(item.path("retailPrice").asDouble());
                 }
             }
-            // Fall back to the first item if none match the expected product name exactly.
             JsonNode items = response.path("Items");
             if (items.isArray() && items.size() > 0) {
                 return Optional.of(items.get(0).path("retailPrice").asDouble());
@@ -168,5 +150,135 @@ public class AzurePricingClient {
             log.warn("Azure pricing lookup failed for {}: {}", category, e.getMessage());
             return Optional.empty();
         }
+    }
+
+    @Override
+    public String providerId() {
+        return "azure";
+    }
+
+    @Override
+    public String providerName() {
+        return "Microsoft Azure";
+    }
+
+    @Override
+    public String defaultRegion() {
+        return "eastus";
+    }
+
+    @Override
+    public Optional<Double> hourlyComputePrice(ScaleTier tier) {
+        return hourlyPriceUsd(computeCategoryFor(tier));
+    }
+
+    @Override
+    public String computeSkuLabel(ScaleTier tier) {
+        return switch (tier) {
+            case XS_2GB -> "Standard_B1ms";
+            case SM_4GB -> "Standard_B2s";
+            case MD_8GB -> "Standard_D2s_v3";
+            case LG_16GB -> "Standard_D4s_v3";
+            case XL_32GB -> "Standard_D8s_v3";
+        };
+    }
+
+    @Override
+    public Map<ScaleTier, SkuPrice> allComputePrices() {
+        Map<ScaleTier, SkuPrice> map = new EnumMap<>(ScaleTier.class);
+        for (ScaleTier tier : ScaleTier.values()) {
+            hourlyComputePrice(tier).ifPresent(price -> 
+                map.put(tier, new SkuPrice(price, computeSkuLabel(tier), "Azure Linux VM (" + tier.label() + ")")));
+        }
+        return map;
+    }
+
+    @Override
+    public Optional<Double> hourlyDatabasePrice(ScaleTier tier) {
+        return hourlyPriceUsd(databaseCategoryFor(tier));
+    }
+
+    @Override
+    public String databaseSkuLabel(ScaleTier tier) {
+        return switch (tier) {
+            case XS_2GB -> "Burstable B1ms";
+            case SM_4GB -> "Burstable B2ms";
+            case MD_8GB -> "Burstable B4ms";
+            case LG_16GB -> "General Purpose D2ds_v4";
+            case XL_32GB -> "General Purpose D4ds_v4";
+        };
+    }
+
+    @Override
+    public Map<ScaleTier, SkuPrice> allDatabasePrices() {
+        Map<ScaleTier, SkuPrice> map = new EnumMap<>(ScaleTier.class);
+        for (ScaleTier tier : ScaleTier.values()) {
+            hourlyDatabasePrice(tier).ifPresent(price -> 
+                map.put(tier, new SkuPrice(price, databaseSkuLabel(tier), "Azure Database for PostgreSQL (" + tier.label() + ")")));
+        }
+        return map;
+    }
+
+    @Override
+    public Optional<Double> hourlyCachePrice(ScaleTier tier) {
+        return hourlyPriceUsd(cacheCategoryFor(tier));
+    }
+
+    @Override
+    public String cacheSkuLabel(ScaleTier tier) {
+        return switch (tier) {
+            case XS_2GB -> "Basic C0";
+            case SM_4GB -> "Basic C1";
+            case MD_8GB -> "Basic C2";
+            case LG_16GB -> "Basic C3";
+            case XL_32GB -> "Basic C4";
+        };
+    }
+
+    @Override
+    public Map<ScaleTier, SkuPrice> allCachePrices() {
+        Map<ScaleTier, SkuPrice> map = new EnumMap<>(ScaleTier.class);
+        for (ScaleTier tier : ScaleTier.values()) {
+            hourlyCachePrice(tier).ifPresent(price -> 
+                map.put(tier, new SkuPrice(price, cacheSkuLabel(tier), "Azure Cache for Redis (" + tier.label() + ")")));
+        }
+        return map;
+    }
+
+    @Override
+    public Optional<Double> monthlyStorageCostPerGb() {
+        return hourlyPriceUsd(PricingCategory.OBJECT_STORAGE);
+    }
+
+    @Override
+    public String storageSkuLabel() {
+        return "Blob Storage Hot LRS";
+    }
+
+    @Override
+    public Optional<Double> hourlyLoadBalancerPrice() {
+        return Optional.of(0.025); // Standard Load Balancer rule/hr baseline
+    }
+
+    @Override
+    public String loadBalancerSkuLabel() {
+        return "Standard Load Balancer";
+    }
+
+    @Override
+    public Optional<Double> pricePerMillionRequests(String componentType) {
+        return switch (componentType) {
+            case "apiGateway" -> Optional.of(3.50);
+            case "queue" -> Optional.of(0.40);
+            case "serverless" -> Optional.of(0.20);
+            case "eventBus" -> Optional.of(0.60);
+            case "waf" -> Optional.of(0.60);
+            default -> Optional.empty();
+        };
+    }
+
+    @Override
+    public double egressPricePerGb() {
+        return 0.087; // Azure standard Internet egress rate
     }
 }

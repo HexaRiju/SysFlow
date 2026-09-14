@@ -142,6 +142,61 @@ export interface PricingEstimate {
   nodes: PricingNodeCost[]
 }
 
+export interface ProviderCostSummary {
+  providerId: 'aws' | 'gcp' | 'azure' | string
+  providerName: string
+  region: string
+  totalMonthlyCostUsd: number
+  provisionedCostUsd: number
+  dynamicCostUsd: number
+  egressCostUsd: number
+  cacheSavingsUsd: number
+  nodes: PricingNodeCost[]
+}
+
+export interface DynamicUsageMetrics {
+  simulatedRps: number
+  monthlyRequestsMillions: number
+  monthlyEgressGb: number
+  cacheHitRatePct: number
+}
+
+export interface PricingCompareResponse {
+  providers: Record<string, ProviderCostSummary>
+  bestValueProvider: string
+  maxMonthlySavingsUsd: number
+  dynamicMetrics: DynamicUsageMetrics
+  recommendations: string[]
+}
+
+export interface TierPrice {
+  hourlyUsd: number
+  monthlyUsd: number
+  skuName: string
+  description: string
+}
+
+export interface CategoryPricing {
+  tiers: Record<string, TierPrice>
+}
+
+export interface ProviderScalePricing {
+  providerId: string
+  providerName: string
+  region: string
+  categories: Record<string, CategoryPricing>
+}
+
+export interface ScalePricingResponse {
+  providers: Record<string, ProviderScalePricing>
+}
+
+export async function getScaleTiers(): Promise<ScalePricingResponse> {
+  const res = await fetch(`${API_BASE}/pricing/scale-tiers`)
+  if (!res.ok) throw new Error(`Scale tiers fetch failed: ${res.status}`)
+  return res.json()
+}
+
 export async function estimateRealCost(
   nodes: { id: string; type: string; config: Record<string, unknown> }[],
 ): Promise<PricingEstimate> {
@@ -151,6 +206,25 @@ export async function estimateRealCost(
     body: JSON.stringify({ graphJson: { nodes } }),
   })
   if (!res.ok) throw new Error(`Pricing estimate failed: ${res.status}`)
+  return res.json()
+}
+
+export async function compareMultiCloudCosts(
+  nodes: { id: string; type: string; config: Record<string, unknown> }[],
+  edges: { id: string; source: string; target: string }[],
+  targetRps?: number,
+  simulationSummary?: SimulationSummary | null,
+): Promise<PricingCompareResponse> {
+  const res = await fetch(`${API_BASE}/pricing/compare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      graphJson: { nodes, edges },
+      targetRps,
+      simulationSummary,
+    }),
+  })
+  if (!res.ok) throw new Error(`Multi-cloud pricing comparison failed: ${res.status}`)
   return res.json()
 }
 

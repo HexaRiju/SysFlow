@@ -43,7 +43,7 @@ class PricingControllerTest {
 
     @Test
     void usesRealPriceWhenAvailableForMappedType() throws Exception {
-        when(pricingClient.monthlyPriceUsd(AzurePricingClient.PricingCategory.GENERIC_COMPUTE_SMALL))
+        when(pricingClient.monthlyPriceUsd(AzurePricingClient.PricingCategory.GENERIC_COMPUTE_XS_2GB))
                 .thenReturn(Optional.of(30.0));
 
         Map<String, Object> body = Map.of("graphJson", Map.of(
@@ -90,7 +90,7 @@ class PricingControllerTest {
 
     @Test
     void picksLargerSkuTierForHighlyConfiguredCompute() throws Exception {
-        when(pricingClient.monthlyPriceUsd(AzurePricingClient.PricingCategory.GENERIC_COMPUTE_LARGE))
+        when(pricingClient.monthlyPriceUsd(AzurePricingClient.PricingCategory.GENERIC_COMPUTE_XL_32GB))
                 .thenReturn(Optional.of(140.0));
 
         Map<String, Object> body = Map.of("graphJson", Map.of(
@@ -103,12 +103,12 @@ class PricingControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.nodes[0].source").value("real"))
                 .andExpect(jsonPath("$.nodes[0].monthlyCostUsd").value(140.0))
-                .andExpect(jsonPath("$.nodes[0].note", org.hamcrest.Matchers.containsString("D4s_v3")));
+                .andExpect(jsonPath("$.nodes[0].note", org.hamcrest.Matchers.containsString("D8s_v3")));
     }
 
     @Test
     void totalIsSumOfPerNodeCosts() throws Exception {
-        when(pricingClient.monthlyPriceUsd(AzurePricingClient.PricingCategory.GENERIC_COMPUTE_SMALL))
+        when(pricingClient.monthlyPriceUsd(AzurePricingClient.PricingCategory.GENERIC_COMPUTE_XS_2GB))
                 .thenReturn(Optional.of(30.0));
 
         Map<String, Object> body = Map.of("graphJson", Map.of(
@@ -123,5 +123,30 @@ class PricingControllerTest {
                         .content(objectMapper.writeValueAsString(body)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.totalMonthlyCostUsd").value(48.0)); // 30 (real svc) + 18 (illustrative lb)
+    }
+
+    @Test
+    void compareReturnsMultiCloudEstimatesAndRecommendations() throws Exception {
+        when(pricingClient.providerId()).thenReturn("azure");
+        when(pricingClient.providerName()).thenReturn("Microsoft Azure");
+        when(pricingClient.defaultRegion()).thenReturn("eastus");
+
+        Map<String, Object> body = Map.of(
+                "graphJson", Map.of(
+                        "nodes", List.of(Map.of("id", "svc", "type", "service", "config", Map.of())),
+                        "edges", List.of()
+                ),
+                "targetRps", 150.0
+        );
+
+        mockMvc.perform(post("/api/pricing/compare")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(body)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.providers.aws.providerId").value("aws"))
+                .andExpect(jsonPath("$.providers.gcp.providerId").value("gcp"))
+                .andExpect(jsonPath("$.providers.azure.providerId").value("azure"))
+                .andExpect(jsonPath("$.bestValueProvider").isNotEmpty())
+                .andExpect(jsonPath("$.dynamicMetrics.simulatedRps").value(150.0));
     }
 }

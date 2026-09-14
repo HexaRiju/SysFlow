@@ -53,6 +53,7 @@ function costOf(nodes: Node<ArchNodeData>[]): number {
     nodes.map((n) => ({
       type: n.data.componentType as ComponentType,
       replicas: replicasOf(n.data.componentType, n.data.config, n.data.replicas),
+      config: n.data.config
     })),
   )
 }

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { Node } from 'reactflow'
-import { COMPONENT_LIBRARY } from './nodes'
+import { COMPONENT_LIBRARY, type ComponentType } from './nodes'
 import { COMPONENT_ICONS } from './icons'
 import type { ArchNodeData } from './ArchNode'
+import { estimateNodeMonthlyCost, replicasOf } from '../lib/cost'
 
 interface Props {
   node: Node<ArchNodeData> | null
@@ -51,6 +52,7 @@ export default function ConfigPanel({ node, onChange, onDelete, onClose }: Props
   const healthLabel = health === 'underLoad' ? 'Warning' : health === 'critical' ? 'Critical' : health === 'down' ? 'Down' : health === 'healthy' ? 'Healthy' : 'Ready'
 
   const primaryFields = [
+    ...(Object.prototype.hasOwnProperty.call(draft, 'scale') ? [{ key: 'scale', label: 'Memory Scale' }] : []),
     ...(Object.prototype.hasOwnProperty.call(draft, 'maxThroughput') ? [{ key: 'maxThroughput', label: 'Capacity (RPS)' }] : []),
     ...(Object.prototype.hasOwnProperty.call(draft, 'maxConcurrency') ? [{ key: 'maxConcurrency', label: 'Capacity' }] : []),
     ...(Object.prototype.hasOwnProperty.call(draft, 'minLatencyMs') ? [{ key: 'minLatencyMs', label: 'Latency (ms)' }] : []),
@@ -59,6 +61,8 @@ export default function ConfigPanel({ node, onChange, onDelete, onClose }: Props
     ...(Object.prototype.hasOwnProperty.call(draft, 'failureRateAtSaturation') ? [{ key: 'failureRateAtSaturation', label: 'Failure Rate (%)' }] : []),
     ...(Object.prototype.hasOwnProperty.call(draft, 'replicaCount') ? [{ key: 'replicaCount', label: 'Instances' }] : []),
   ]
+
+  const nodeCost = node ? estimateNodeMonthlyCost(node.data.componentType as ComponentType, replicasOf(node.data.componentType, draft), draft) : 0
 
   return (
     <>
@@ -90,9 +94,17 @@ export default function ConfigPanel({ node, onChange, onDelete, onClose }: Props
 
       {tab === 'configure' && (
         <div className="flex-1 overflow-y-auto p-4">
-          <div className="rounded-xl border border-zinc-100 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-800/40 p-3">
-            <p className="text-[9px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">Type</p>
-            <p className="mt-1 text-sm font-medium text-zinc-800 dark:text-zinc-100">{def?.label ?? node.data.componentType}</p>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="rounded-xl border border-zinc-100 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-800/40 p-3">
+              <p className="text-[9px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">Type</p>
+              <p className="mt-1 text-sm font-medium text-zinc-800 dark:text-zinc-100">{def?.label ?? node.data.componentType}</p>
+            </div>
+            <div className="rounded-xl border border-zinc-100 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-800/40 p-3">
+              <p className="text-[9px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">Est. Cost</p>
+              <p className="mt-1 text-sm font-semibold text-emerald-600 dark:text-emerald-400">
+                ${nodeCost.toFixed(0)}<span className="text-[10px] font-normal text-zinc-400">/mo</span>
+              </p>
+            </div>
           </div>
 
           <label className="mt-4 block text-[10px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
@@ -104,7 +116,18 @@ export default function ConfigPanel({ node, onChange, onDelete, onClose }: Props
             {primaryFields.map(({ key, label }) => (
               <label key={key} className="block text-[10px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
                 {label}
-                <input type={typeof draft[key] === 'number' ? 'number' : 'text'} value={String(draft[key] ?? '')} onChange={(e) => setField(key, e.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-2.5 text-sm font-medium normal-case tracking-normal text-zinc-800 dark:text-zinc-100 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100 dark:focus:ring-violet-900/40" />
+                {key === 'scale' ? (
+                  <select value={String(draft[key] ?? 'Auto')} onChange={(e) => setField(key, e.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-2.5 text-sm font-medium normal-case tracking-normal text-zinc-800 dark:text-zinc-100 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100 dark:focus:ring-violet-900/40">
+                    <option value="Auto">Auto-sized from Load</option>
+                    <option value="XS_2GB">2GB (Extra Small)</option>
+                    <option value="SM_4GB">4GB (Small)</option>
+                    <option value="MD_8GB">8GB (Medium)</option>
+                    <option value="LG_16GB">16GB (Large)</option>
+                    <option value="XL_32GB">32GB (Extra Large)</option>
+                  </select>
+                ) : (
+                  <input type={typeof draft[key] === 'number' ? 'number' : 'text'} value={String(draft[key] ?? '')} onChange={(e) => setField(key, e.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-2.5 text-sm font-medium normal-case tracking-normal text-zinc-800 dark:text-zinc-100 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100 dark:focus:ring-violet-900/40" />
+                )}
               </label>
             ))}
           </div>

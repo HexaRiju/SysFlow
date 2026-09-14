@@ -5,9 +5,9 @@ import Canvas from '../components/Canvas'
 import FindingsPanel from '../components/FindingsPanel'
 import type { ArchNodeData } from '../components/ArchNode'
 import { useSimulation } from '../lib/useSimulation'
-import { analyzeGraph, estimateRealCost, gradeInterview, importSrs, listInterviewPrompts, type AnalyzeResult, type InjectedFailure, type InterviewGrade, type InterviewPrompt, type PricingEstimate, type SrsImportResult } from '../lib/api'
-import { ClockIcon, PacketDropIcon, SkullIcon, ThrottleIcon } from '../components/icons'
 import { useAuth } from '../lib/AuthContext'
+import { analyzeGraph, compareMultiCloudCosts, estimateRealCost, getScaleTiers, gradeInterview, importSrs, listInterviewPrompts, type AnalyzeResult, type InjectedFailure, type InterviewGrade, type InterviewPrompt, type PricingCompareResponse, type PricingEstimate, type ScalePricingResponse, type SrsImportResult } from '../lib/api'
+import { ClockIcon, PacketDropIcon, SkullIcon, ThrottleIcon } from '../components/icons'
 import { createProject, getProject, getPublicProject, listVersions, restoreVersion, updateProject, type ProjectVersionSummary } from '../lib/projects'
 import { TEMPLATES } from '../lib/templates'
 import { useHistory } from '../lib/useHistory'
@@ -89,6 +89,10 @@ export default function EditorPage() {
   const [restoringVersionId, setRestoringVersionId] = useState<string | null>(null)
   const [compareNodeId, setCompareNodeId] = useState<string | null>(null)
   const [realPricing, setRealPricing] = useState<PricingEstimate | null>(null)
+  const [multiCloudPricing, setMultiCloudPricing] = useState<PricingCompareResponse | null>(null)
+  const [scaleTiers, setScaleTiers] = useState<ScalePricingResponse | null>(null)
+  const [pricingTab, setPricingTab] = useState<'all' | 'aws' | 'gcp' | 'azure' | 'scale'>('all')
+  const [pricingCostMode, setPricingCostMode] = useState<'endToEnd' | 'provisioned'>('endToEnd')
   const [isLoadingRealPricing, setIsLoadingRealPricing] = useState(false)
   const [realPricingOpen, setRealPricingOpen] = useState(false)
   const [realPricingError, setRealPricingError] = useState<string | null>(null)
@@ -243,7 +247,7 @@ export default function EditorPage() {
   const canRun = nodes.length > 0 && hasClient && !sim.isRunning
   const global = sim.currentTick?.global
   const estimatedMonthlyCost = estimateTotalMonthlyCost(
-    nodes.map((n) => ({ type: n.data.componentType as ComponentType, replicas: replicasOf(n.data.componentType, n.data.config, n.data.replicas) })),
+    nodes.map((n) => ({ type: n.data.componentType as ComponentType, replicas: replicasOf(n.data.componentType, n.data.config, n.data.replicas), config: n.data.config })),
   )
   const simulationState = sim.isRunning ? 'Starting' : sim.isPlaying ? 'Running' : sim.result ? 'Paused' : 'Ready'
 
@@ -348,8 +352,26 @@ export default function EditorPage() {
     setIsLoadingRealPricing(true)
     setRealPricingError(null)
     try {
-      const result = await estimateRealCost(nodes.map((n) => ({ id: n.id, type: n.data.componentType, config: n.data.config })))
-      setRealPricing(result)
+      const nodePayload = nodes.map((n) => ({ id: n.id, type: n.data.componentType, config: n.data.config }))
+      const edgePayload = edges.map((e) => ({ id: e.id, source: e.source, target: e.target }))
+      const currentRps = baseRps * traffic
+      const [legacyResult, multiResult, scaleResult] = await Promise.allSettled([
+        estimateRealCost(nodePayload),
+        compareMultiCloudCosts(nodePayload, edgePayload, currentRps, sim.result?.summary ?? null),
+        getScaleTiers()
+      ])
+      if (scaleResult.status === 'fulfilled') {
+        setScaleTiers(scaleResult.value)
+      }
+      if (multiResult.status === 'fulfilled') {
+        setMultiCloudPricing(multiResult.value)
+      }
+      if (legacyResult.status === 'fulfilled') {
+        setRealPricing(legacyResult.value)
+      }
+      if (legacyResult.status === 'rejected' && multiResult.status === 'rejected') {
+        throw new Error('Pricing lookup failed')
+      }
     } catch (err) {
       setRealPricingError(err instanceof Error ? err.message : 'Pricing lookup failed')
     } finally {
@@ -585,14 +607,14 @@ export default function EditorPage() {
           </div>
         </div>
 
-        <div className="hidden min-w-0 flex-1 items-center justify-center gap-2 xl:flex">
+        <div className="hidden min-w-0 flex-1 items-center justify-center gap-2 md:flex">
           <span className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold ${isDirty ? 'bg-amber-50 dark:bg-amber-950/50 text-amber-600 dark:text-amber-400' : 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400'}`}>
             <span className="h-1.5 w-1.5 rounded-full bg-current" /> {isSaving ? 'Saving…' : isDirty ? 'Unsaved changes' : 'Saved'}
           </span>
           {nodes.length > 0 && (
             <button
               onClick={toggleRealPricing}
-              title="Illustrative estimate — click for real Azure pricing where available"
+              title="Click to view full Multi-Cloud Cost Pipeline (AWS, GCP, Azure)"
               className="flex items-center gap-1.5 rounded-full bg-zinc-100 dark:bg-zinc-800 px-2.5 py-1 text-[10px] font-semibold text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700"
             >
               ~${estimatedMonthlyCost.toLocaleString()}/mo <span className="text-zinc-400 dark:text-zinc-500">▾</span>
@@ -801,34 +823,239 @@ export default function EditorPage() {
 
       {realPricingOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/20 dark:bg-black/50 p-4 backdrop-blur-sm" onClick={() => setRealPricingOpen(false)}>
-          <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-zinc-900 p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">Cost breakdown</h3>
-              <button onClick={() => setRealPricingOpen(false)} className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200">✕</button>
+          <div className="w-full max-w-2xl rounded-2xl bg-white dark:bg-zinc-900 p-6 shadow-2xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-800 pb-3">
+              <div>
+                <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">Multi-Cloud Cost Pipeline</h3>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">AWS vs GCP vs Azure end-to-end pricing</p>
+              </div>
+              <button onClick={() => setRealPricingOpen(false)} className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 text-lg">✕</button>
             </div>
-            {isLoadingRealPricing && <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">Fetching real Azure pricing…</p>}
+
+            {isLoadingRealPricing && <p className="mt-6 text-sm text-zinc-400 dark:text-zinc-500 text-center py-8">Calculating multi-cloud pipeline pricing…</p>}
             {realPricingError && <p className="mt-3 text-xs text-red-500 dark:text-red-400">{realPricingError} — showing illustrative only.</p>}
-            {!isLoadingRealPricing && realPricing && (
-              <>
-                <div className="mt-3">
-                  <p className="text-xl font-bold text-zinc-900 dark:text-zinc-50">${realPricing.totalMonthlyCostUsd.toFixed(2)}<span className="text-sm font-medium text-zinc-400 dark:text-zinc-500">/mo</span></p>
-                  <p className="mt-0.5 text-[11px] text-zinc-400 dark:text-zinc-500">Mixing real Azure prices ({realPricing.region}) where verified, illustrative elsewhere</p>
+
+            {!isLoadingRealPricing && multiCloudPricing && (
+              <div className="mt-4 space-y-4 overflow-y-auto pr-1">
+                {/* Mode & Tab Bar */}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center rounded-lg bg-zinc-100 dark:bg-zinc-800 p-0.5 text-xs font-medium">
+                    {(['all', 'aws', 'gcp', 'azure', 'scale'] as const).map((tab) => (
+                      <button
+                        key={tab}
+                        onClick={() => setPricingTab(tab)}
+                        className={`rounded-md px-3 py-1.5 transition ${
+                          pricingTab === tab
+                            ? 'bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-50 shadow-sm'
+                            : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200'
+                        }`}
+                      >
+                        {tab === 'all' ? 'All (Compare)' : tab === 'scale' ? 'Scale Tiers' : tab.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center gap-1 text-xs">
+                    <span className="text-zinc-400">View:</span>
+                    <button
+                      onClick={() => setPricingCostMode(pricingCostMode === 'endToEnd' ? 'provisioned' : 'endToEnd')}
+                      className={`rounded-lg px-2.5 py-1 text-xs font-medium border transition ${
+                        pricingCostMode === 'endToEnd'
+                          ? 'border-indigo-500/40 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400'
+                          : 'border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300'
+                      }`}
+                    >
+                      {pricingCostMode === 'endToEnd' ? '⚡ End-to-End (Traffic & Egress)' : '📦 Provisioned Base Only'}
+                    </button>
+                  </div>
                 </div>
+
+                {/* Compare All View */}
+                {pricingTab === 'all' && (
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {(['aws', 'gcp', 'azure'] as const).map((pid) => {
+                        const p = multiCloudPricing.providers[pid]
+                        if (!p) return null
+                        const isBest = multiCloudPricing.bestValueProvider === pid
+                        const displayCost = pricingCostMode === 'endToEnd' ? p.totalMonthlyCostUsd : p.provisionedCostUsd
+                        return (
+                          <div
+                            key={pid}
+                            onClick={() => setPricingTab(pid)}
+                            className={`cursor-pointer rounded-xl border p-3.5 transition hover:border-indigo-400 dark:hover:border-indigo-500 ${
+                              isBest
+                                ? 'border-emerald-500/50 bg-emerald-50/30 dark:bg-emerald-950/20'
+                                : 'border-zinc-200 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900/50'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 uppercase tracking-wide">
+                                {p.providerName}
+                              </span>
+                              {isBest && (
+                                <span className="rounded-full bg-emerald-100 dark:bg-emerald-900/50 px-2 py-0.5 text-[9px] font-bold text-emerald-700 dark:text-emerald-300 uppercase">
+                                  Best Value
+                                </span>
+                              )}
+                            </div>
+                            <p className="mt-2 text-xl font-bold text-zinc-900 dark:text-zinc-50">
+                              ${displayCost.toFixed(2)}
+                              <span className="text-xs font-normal text-zinc-400 dark:text-zinc-500">/mo</span>
+                            </p>
+                            <p className="mt-0.5 text-[11px] text-zinc-400">{p.region}</p>
+
+                            <div className="mt-2.5 pt-2 border-t border-zinc-100 dark:border-zinc-800/80 space-y-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                              <div className="flex justify-between">
+                                <span>Provisioned:</span>
+                                <span className="font-medium text-zinc-700 dark:text-zinc-300">${p.provisionedCostUsd.toFixed(2)}</span>
+                              </div>
+                              {pricingCostMode === 'endToEnd' && (
+                                <>
+                                  <div className="flex justify-between">
+                                    <span>Requests:</span>
+                                    <span className="font-medium text-zinc-700 dark:text-zinc-300">${p.dynamicCostUsd.toFixed(2)}</span>
+                                  </div>
+                                  <div className="flex justify-between">
+                                    <span>Egress ({multiCloudPricing.dynamicMetrics.monthlyEgressGb.toFixed(0)} GB):</span>
+                                    <span className="font-medium text-zinc-700 dark:text-zinc-300">${p.egressCostUsd.toFixed(2)}</span>
+                                  </div>
+                                  {p.cacheSavingsUsd > 0 && (
+                                    <div className="flex justify-between text-emerald-600 dark:text-emerald-400">
+                                      <span>Cache Savings:</span>
+                                      <span className="font-medium">-${p.cacheSavingsUsd.toFixed(2)}</span>
+                                    </div>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+
+                    {/* Operational Metrics & Recommendations */}
+                    <div className="rounded-xl bg-zinc-50 dark:bg-zinc-800/40 p-3 text-xs space-y-1.5 border border-zinc-100 dark:border-zinc-800">
+                      <div className="flex items-center justify-between text-zinc-600 dark:text-zinc-300 font-medium">
+                        <span>Simulated Monthly Volume:</span>
+                        <span>
+                          {multiCloudPricing.dynamicMetrics.simulatedRps} RPS · {multiCloudPricing.dynamicMetrics.monthlyRequestsMillions.toFixed(1)}M reqs/mo · {multiCloudPricing.dynamicMetrics.monthlyEgressGb.toFixed(1)} GB
+                        </span>
+                      </div>
+                      {multiCloudPricing.dynamicMetrics.cacheHitRatePct > 0 && (
+                        <p className="text-[11px] text-emerald-600 dark:text-emerald-400">
+                          🛡️ CDN active with {multiCloudPricing.dynamicMetrics.cacheHitRatePct}% hit rate reducing backend traffic and egress fees.
+                        </p>
+                      )}
+                      {multiCloudPricing.recommendations.map((rec, i) => (
+                        <p key={i} className="text-[11px] text-zinc-500 dark:text-zinc-400">💡 {rec}</p>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                  {/* Scale Tiers Matrix */}
+                  {pricingTab === 'scale' && scaleTiers && (
+                    <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
+                      {['compute', 'database', 'cache'].map((cat) => (
+                        <div key={cat} className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 overflow-hidden">
+                          <div className="bg-zinc-50 dark:bg-zinc-800/50 px-3 py-2 border-b border-zinc-200 dark:border-zinc-800">
+                            <h3 className="font-semibold text-xs text-zinc-800 dark:text-zinc-200 uppercase tracking-wide">{cat}</h3>
+                          </div>
+                          <table className="w-full text-xs text-left">
+                            <thead className="bg-zinc-50/50 dark:bg-zinc-800/20 text-zinc-500">
+                              <tr>
+                                <th className="px-3 py-2 font-medium">Tier</th>
+                                {Object.values(scaleTiers.providers).map(p => (
+                                  <th key={p.providerId} className="px-3 py-2 font-medium">{p.providerName}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                              {Object.keys(scaleTiers.providers['aws']?.categories[cat]?.tiers || {}).map((tierName) => (
+                                <tr key={tierName} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/30">
+                                  <td className="px-3 py-2 font-medium text-zinc-700 dark:text-zinc-300 whitespace-nowrap">{tierName}</td>
+                                  {Object.values(scaleTiers.providers).map(p => {
+                                    const tp = p.categories[cat]?.tiers[tierName]
+                                    if (!tp) return <td key={p.providerId} className="px-3 py-2">-</td>
+                                    return (
+                                      <td key={p.providerId} className="px-3 py-2" title={tp.description}>
+                                        <div className="flex flex-col">
+                                          <span className="font-semibold text-zinc-900 dark:text-zinc-100">${tp.monthlyUsd.toFixed(2)}<span className="text-[9px] text-zinc-400 font-normal">/mo</span></span>
+                                          <span className="text-[10px] text-zinc-500 font-mono mt-0.5">{tp.skuName}</span>
+                                        </div>
+                                      </td>
+                                    )
+                                  })}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Single Provider Details */}
+                  {pricingTab !== 'all' && pricingTab !== 'scale' && multiCloudPricing.providers[pricingTab] && (() => {
+                  const p = multiCloudPricing.providers[pricingTab]
+                  return (
+                    <div className="space-y-3">
+                      <div className="flex items-baseline justify-between rounded-xl bg-zinc-50 dark:bg-zinc-800/50 p-3 border border-zinc-100 dark:border-zinc-800">
+                        <div>
+                          <p className="text-xs text-zinc-400">{p.providerName} · {p.region}</p>
+                          <p className="text-2xl font-bold text-zinc-900 dark:text-zinc-50">
+                            ${(pricingCostMode === 'endToEnd' ? p.totalMonthlyCostUsd : p.provisionedCostUsd).toFixed(2)}
+                            <span className="text-sm font-normal text-zinc-400">/mo</span>
+                          </p>
+                        </div>
+                        <div className="text-right text-xs space-y-0.5 text-zinc-500">
+                          <p>Instances: <span className="font-semibold text-zinc-700 dark:text-zinc-200">${p.provisionedCostUsd.toFixed(2)}</span></p>
+                          {pricingCostMode === 'endToEnd' && (
+                            <>
+                              <p>Traffic/Requests: <span className="font-semibold text-zinc-700 dark:text-zinc-200">${p.dynamicCostUsd.toFixed(2)}</span></p>
+                              <p>Egress: <span className="font-semibold text-zinc-700 dark:text-zinc-200">${p.egressCostUsd.toFixed(2)}</span></p>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="max-h-60 space-y-1 overflow-y-auto rounded-xl border border-zinc-100 dark:border-zinc-800 p-1">
+                        {p.nodes.map((n) => (
+                          <div key={n.id} className="rounded-lg px-2.5 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="truncate font-medium text-zinc-700 dark:text-zinc-300">{n.id}</span>
+                              <span className="flex items-center gap-1.5 shrink-0">
+                                <span className={`rounded-full px-1.5 py-0.5 text-[8px] font-semibold uppercase ${n.source === 'real' ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400' : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-400'}`}>
+                                  {n.source}
+                                </span>
+                                <span className="font-semibold text-zinc-800 dark:text-zinc-200">${n.monthlyCostUsd.toFixed(2)}</span>
+                              </span>
+                            </div>
+                            <p className="mt-0.5 text-[10px] leading-snug text-zinc-400 dark:text-zinc-500">{n.note}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })()}
+              </div>
+            )}
+
+            {!isLoadingRealPricing && !multiCloudPricing && realPricing && (
+              <div className="mt-3">
+                <p className="text-xl font-bold text-zinc-900 dark:text-zinc-50">${realPricing.totalMonthlyCostUsd.toFixed(2)}<span className="text-sm font-medium text-zinc-400">/mo</span></p>
                 <div className="mt-3 max-h-64 space-y-1 overflow-y-auto rounded-xl border border-zinc-100 dark:border-zinc-800 p-1">
                   {realPricing.nodes.map((n) => (
                     <div key={n.id} className="rounded-lg px-2.5 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800">
                       <div className="flex items-center justify-between text-xs">
                         <span className="truncate text-zinc-600 dark:text-zinc-300">{n.id}</span>
-                        <span className="flex items-center gap-1.5 shrink-0">
-                          <span className={`rounded-full px-1.5 py-0.5 text-[8px] font-semibold uppercase ${n.source === 'real' ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400' : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500'}`}>{n.source}</span>
-                          <span className="font-medium text-zinc-700 dark:text-zinc-300">${n.monthlyCostUsd.toFixed(2)}</span>
-                        </span>
+                        <span className="font-medium text-zinc-700 dark:text-zinc-300">${n.monthlyCostUsd.toFixed(2)}</span>
                       </div>
-                      <p className="mt-0.5 text-[10px] leading-snug text-zinc-400 dark:text-zinc-500">{n.note}</p>
                     </div>
                   ))}
                 </div>
-              </>
+              </div>
             )}
           </div>
         </div>
@@ -979,11 +1206,23 @@ export default function EditorPage() {
             </div>}
           </div>
 
-          <div className="live-metrics ml-auto flex min-w-[310px] items-center gap-5 rounded-xl border border-zinc-100 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-800/40 px-4 py-2">
+          <div className="live-metrics ml-auto flex min-w-[380px] items-center gap-5 rounded-xl border border-zinc-100 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-800/40 px-4 py-2">
             <div><span>RPS</span><b>{Math.round(global?.rps ?? 0).toLocaleString()}</b></div>
             <div><span>p95 latency</span><b>{Math.round(global?.p95 ?? 0)}ms</b></div>
             <div><span>Error rate</span><b className={(global?.errorRatePct ?? 0) >= 5 ? 'bad' : ''}>{(global?.errorRatePct ?? 0).toFixed(1)}%</b></div>
             <div><span>Throughput</span><b>{((global?.rps ?? 0) / 100).toFixed(1)} MB/s</b></div>
+            {nodes.length > 0 && (
+              <button
+                onClick={toggleRealPricing}
+                title="Click to open Multi-Cloud Cost Pipeline (AWS, GCP, Azure)"
+                className="flex items-center gap-1.5 rounded-lg border border-emerald-200 dark:border-emerald-800/60 bg-emerald-50/70 dark:bg-emerald-950/40 px-2.5 py-1 text-left transition hover:bg-emerald-100 dark:hover:bg-emerald-900/40"
+              >
+                <div>
+                  <span className="block text-[8px] font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">Cloud Cost ▾</span>
+                  <b className="text-xs font-bold text-emerald-700 dark:text-emerald-300">~${estimatedMonthlyCost.toLocaleString()}/mo</b>
+                </div>
+              </button>
+            )}
           </div>
 
           <button onClick={handleAnalyze} disabled={nodes.length === 0 || isAnalyzing} className="analyze-button">✨ <span>{isAnalyzing ? 'Analyzing…' : 'Analyze'}</span><small>AI Analysis</small></button>

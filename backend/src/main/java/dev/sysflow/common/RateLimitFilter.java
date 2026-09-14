@@ -24,7 +24,8 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 public class RateLimitFilter extends OncePerRequestFilter {
 
-    private static final Set<String> LIMITED_PATHS = Set.of("/api/ai/analyze", "/api/srs/import", "/api/pricing/estimate", "/api/interview/grade");
+    private static final Set<String> LIMITED_PATHS = Set.of(
+            "/api/ai/analyze", "/api/srs/import", "/api/pricing/estimate", "/api/pricing/compare", "/api/interview/grade");
     private static final int MAX_REQUESTS_PER_WINDOW = 20;
     private static final long WINDOW_MILLIS = 60_000;
 
