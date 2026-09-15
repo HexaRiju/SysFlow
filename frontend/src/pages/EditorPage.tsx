@@ -249,7 +249,29 @@ export default function EditorPage() {
   const estimatedMonthlyCost = estimateTotalMonthlyCost(
     nodes.map((n) => ({ type: n.data.componentType as ComponentType, replicas: replicasOf(n.data.componentType, n.data.config, n.data.replicas), config: n.data.config })),
   )
-  const simulationState = sim.isRunning ? 'Starting' : sim.isPlaying ? 'Running' : sim.result ? 'Paused' : 'Ready'
+  const simulationState = sim.isBusted
+    ? 'Busted'
+    : sim.isRunning
+      ? 'Starting'
+      : sim.isPlaying
+        ? 'Running'
+        : sim.result
+          ? 'Paused'
+          : 'Ready'
+
+  useEffect(() => {
+    if (sim.isBusted && sim.bustedInfo) {
+      setToast(`💥 System Failure: "${sim.bustedInfo.nodeLabel}" crashed under load (${Math.round(sim.bustedInfo.rps)} RPS vs capacity ${sim.bustedInfo.capacity})`)
+    }
+  }, [sim.isBusted, sim.bustedInfo])
+
+  useEffect(() => {
+    sim.updateFailures(failures)
+  }, [failures, sim])
+
+  useEffect(() => {
+    sim.setTrafficMultiplier(traffic)
+  }, [traffic, sim])
 
   const markDirty = () => setIsDirty(true)
 
@@ -264,11 +286,16 @@ export default function EditorPage() {
   }
 
   const handleRun = () => {
-    if (sim.result) {
+    sim.setTrafficMultiplier(traffic)
+    if (sim.isBusted) {
+      sim.run(nodes, edges, baseRps, 0, failures)
+      return
+    }
+    if (sim.result && !sim.isPlaying) {
       sim.resume()
       return
     }
-    sim.run(nodes, edges, baseRps * traffic, 3, failures)
+    sim.run(nodes, edges, baseRps, 0, failures)
   }
 
   const handleAnalyze = async () => {
@@ -1177,7 +1204,7 @@ export default function EditorPage() {
       <footer className="simulation-footer relative z-30 overflow-x-hidden border-t border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-4 py-2.5 shadow-[0_-4px_20px_rgba(0,0,0,0.04)] sm:px-5">
         <div className="flex min-w-0 flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
-            <button onClick={handleRun} disabled={!canRun} className="run-button"><span>{sim.isPlaying ? '▶' : '▶'}</span> {sim.isPlaying ? 'Running' : sim.result ? 'Resume' : sim.isRunning ? 'Starting…' : 'Run'}<small>Ctrl + Enter</small></button>
+            <button onClick={handleRun} disabled={!canRun} className={`run-button ${sim.isBusted ? '!bg-red-600 hover:!bg-red-700' : ''}`}><span>{sim.isPlaying ? '▶' : '▶'}</span> {sim.isBusted ? 'Restart' : sim.isPlaying ? 'Running' : sim.result ? 'Resume' : sim.isRunning ? 'Starting…' : 'Run'}<small>Ctrl + Enter</small></button>
             {sim.isPlaying && <button onClick={sim.pause} className="simulation-secondary">Pause</button>}
             {sim.result && <button onClick={sim.reset} className="simulation-secondary danger">Stop</button>}
           </div>
@@ -1185,7 +1212,7 @@ export default function EditorPage() {
           <div className="simulation-state"><span className={`state-dot ${simulationState.toLowerCase()}`} /> Simulation: <b>{simulationState}</b></div>
 
           <div className="segmented-group"><span>Speed</span>{SPEED_OPTIONS.map((value) => <button key={value} onClick={() => sim.setSpeed(value)} className={sim.speed === value ? 'active' : ''}>{value}×</button>)}</div>
-          <div className="segmented-group"><span>Traffic</span>{TRAFFIC_OPTIONS.map((value) => <button key={value} onClick={() => { setTraffic(value); markDirty() }} className={traffic === value ? 'active' : ''}>{value}×</button>)}</div>
+          <div className="segmented-group"><span>Traffic</span>{TRAFFIC_OPTIONS.map((value) => <button key={value} onClick={() => { setTraffic(value); sim.setTrafficMultiplier(value); markDirty() }} className={traffic === value ? 'active' : ''}>{value}×</button>)}</div>
 
           <div className="relative">
             <button onClick={() => setChaosOpen((v) => !v)} className={`chaos-button ${failures.length > 0 ? 'active' : ''}`}>⚡ Chaos {failures.length > 0 && <b>{failures.length}</b>}</button>

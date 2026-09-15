@@ -323,6 +323,7 @@ button:active, a:active {
 .state-dot.running { background:#10b981; box-shadow:0 0 0 4px #d1fae5; }
 .state-dot.paused { background:#f59e0b; }
 .state-dot.starting { background:#06b6d4; animation: live-pulse 1s infinite; }
+.state-dot.busted { background:#ef4444; box-shadow:0 0 0 4px #fee2e2; animation: live-pulse 0.8s infinite; }
 .state-dot.ready { background:#a1a1aa; }
 .segmented-group { display:flex; align-items:center; gap:3px; white-space:nowrap; }
 .segmented-group > span { margin-right:3px; color:#a1a1aa; font-size:10px; font-weight:700; }
