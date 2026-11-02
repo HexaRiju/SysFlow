@@ -93,6 +93,45 @@ export async function runSimulation(input: RunSimulationInput): Promise<Simulati
   return res.json()
 }
 
+export interface SloRequirement {
+  maxP95LatencyMs: number | null
+  maxErrorRatePercent: number | null
+  minThroughputRps: number | null
+}
+
+export interface SloCheck {
+  name: string
+  actualValue: number
+  thresholdValue: number
+  status: 'PASS' | 'FAIL'
+}
+
+export interface SloEvaluationResult {
+  overallStatus: 'PASS' | 'FAIL'
+  checks: SloCheck[]
+}
+
+/**
+ * Evaluates SLO thresholds against an already-computed SimulationResult (e.g. the
+ * response of `runSimulation`). Does NOT run a simulation itself — the backend
+ * SloEvaluator only reads the existing SimulationSummary fields. The backend's
+ * response is the sole source of truth for PASS/FAIL; nothing here evaluates it.
+ */
+export async function evaluateSlo(
+  simulationResult: SimulationResult,
+  sloRequirement: SloRequirement,
+): Promise<SloEvaluationResult> {
+  const res = await fetch(`${API_BASE}/simulations/evaluate-slo`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ simulationResult, sloRequirement }),
+  })
+  if (!res.ok) {
+    throw new Error(`SLO evaluation failed: ${res.status}`)
+  }
+  return res.json()
+}
+
 export interface Finding {
   severity: 'critical' | 'warning' | 'info'
   title: string
