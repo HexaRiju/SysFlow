@@ -21,6 +21,7 @@ import { createComment, deleteComment, listComments, type NodeComment } from '..
 import { useCollabSession } from '../lib/collab'
 import { COMPONENT_LIBRARY, getAggregateClientRps, isClientComponent, type ComponentType } from '../components/nodes'
 import CompareModal from '../components/CompareModal'
+import SloPanel from '../components/SloPanel'
 import SrsDiffModal from '../components/SrsDiffModal'
 import ThemeToggle from '../components/ThemeToggle'
 import logo from '../assets/logo.png'
@@ -115,6 +116,7 @@ export default function EditorPage() {
   const [restoringVersionId, setRestoringVersionId] = useState<string | null>(null)
   const [compareNodeId, setCompareNodeId] = useState<string | null>(null)
     const [architectureCompareOpen, setArchitectureCompareOpen] = useState(false)
+    const [sloPanelOpen, setSloPanelOpen] = useState(false)
   const [architectureBaseline, setArchitectureBaseline] = useState<ArchitectureSnapshot | null>(null)
   const [observabilityOpen, setObservabilityOpen] = useState(false)
       const [realPricing, setRealPricing] = useState<PricingEstimate | null>(null)
@@ -405,6 +407,7 @@ export default function EditorPage() {
 
   const handleAnalyze = async () => {
     setIsAnalyzing(true)
+    setSloPanelOpen(false)
     try {
       const result = await analyzeGraph(
         nodes.map((n) => ({ id: n.id, type: n.data.componentType, config: n.data.config })),
@@ -427,6 +430,7 @@ export default function EditorPage() {
     )
     setValidation(results)
     setAnalysis(null)
+    setSloPanelOpen(false)
   }
 
   const simulateSPOFFailure = (nodeId: string) => {
@@ -984,6 +988,7 @@ export default function EditorPage() {
 
           {projectId && <button onClick={openHistory} className="toolbar-button hidden whitespace-nowrap md:inline-flex">History</button>}
           <button onClick={() => setArchitectureCompareOpen(true)} disabled={nodes.length === 0} className="toolbar-button hidden whitespace-nowrap md:inline-flex disabled:opacity-40">Compare</button>
+          <button onClick={() => { setSloPanelOpen(true); setAnalysis(null); setValidation(null) }} disabled={nodes.length === 0} className="toolbar-button hidden whitespace-nowrap md:inline-flex disabled:opacity-40">Evaluate SLOs</button>
           <button onClick={() => setObservabilityOpen(true)} disabled={nodes.length === 0} className="toolbar-button hidden whitespace-nowrap md:inline-flex disabled:opacity-40">Observe</button>
 
           {!isReadOnly && <input ref={srsFileInputRef} type="file" accept=".pdf,.docx,.txt,.md" className="hidden" onChange={handleSrsFileSelected} />}
@@ -1015,6 +1020,7 @@ export default function EditorPage() {
               {!isReadOnly && <button onClick={() => { srsFileInputRef.current?.click(); setMobileMenuOpen(false) }} disabled={isImportingSrs}>{isImportingSrs ? 'Importing…' : 'Import SRS'}</button>}
               {projectId && <button onClick={() => { openHistory(); setMobileMenuOpen(false) }}>History</button>}
               <button onClick={() => { setArchitectureCompareOpen(true); setMobileMenuOpen(false) }} disabled={nodes.length === 0}>Architecture comparison</button>
+              <button onClick={() => { setSloPanelOpen(true); setAnalysis(null); setValidation(null); setMobileMenuOpen(false) }} disabled={nodes.length === 0}>Evaluate SLOs</button>
               <button onClick={() => { setObservabilityOpen(true); setMobileMenuOpen(false) }} disabled={nodes.length === 0}>Observability dashboard</button>
               {COST_FEATURE_ENABLED && nodes.length > 0 && <button onClick={() => { setMobileMenuOpen(false); toggleRealPricing() }}>Cost estimate (~${estimatedMonthlyCost.toLocaleString()}/mo)</button>}
               {!isReadOnly && <>
@@ -1144,6 +1150,9 @@ export default function EditorPage() {
           />
         )}
         {!analysis && validation && <ValidationPanel results={validation} onFocusNode={(nodeId) => setFocusRequest({ nodeId, token: Date.now() })} onClose={() => setValidation(null)} />}
+        {!analysis && !validation && sloPanelOpen && (
+          <SloPanel nodes={nodes} edges={edges} targetRps={baseRps * traffic} failures={failures} onClose={() => setSloPanelOpen(false)} />
+        )}
  
        </div>
 
